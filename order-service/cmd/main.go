@@ -19,7 +19,7 @@ func main() {
 	defer db.Close()
 
 	repo := repository.NewPostgresOrderRepository(db)
-	uc := usecase.NewOrderUseCase(repo, "http://localhost:8081")
+	uc := usecase.NewOrderUseCase(repo)
 	handler := transport.NewOrderHandler(uc)
 
 	r := gin.Default()
