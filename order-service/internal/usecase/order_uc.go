@@ -49,7 +49,6 @@ func (u *orderUseCase) CreateOrder(customerID, itemName string, amount int64, id
 		return nil, err
 	}
 
-	// 🔥 gRPC CLIENT
 	conn, err := grpc.Dial("localhost:50051", grpc.WithInsecure())
 	if err != nil {
 		u.repo.UpdateStatus(order.ID, "Failed")
