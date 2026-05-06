@@ -5,19 +5,12 @@ import "time"
 type Order struct {
 	ID             string    `json:"id"`
 	CustomerID     string    `json:"customer_id"`
+	CustomerEmail  string    `json:"customer_email"`
 	ItemName       string    `json:"item_name"`
 	Amount         int64     `json:"amount"`
 	Status         string    `json:"status"`
 	CreatedAt      time.Time `json:"created_at"`
 	IdempotencyKey string    `json:"-"`
-}
-
-type PaymentSummary struct {
-	ID            string `json:"id"`
-	OrderID       string `json:"order_id"`
-	TransactionID string `json:"transaction_id"`
-	Amount        int64  `json:"amount"`
-	Status        string `json:"status"`
 }
 
 type OrderRepository interface {
@@ -29,9 +22,8 @@ type OrderRepository interface {
 }
 
 type OrderUseCase interface {
-	CreateOrder(customerID, itemName string, amount int64, idempKey string) (*Order, error)
+	CreateOrder(customerID, customerEmail, itemName string, amount int64, idempKey string) (*Order, error)
 	GetOrder(id string) (*Order, error)
 	CancelOrder(id string) error
 	GetOrdersByAmountRange(minAmount, maxAmount int64) ([]*Order, error)
-	GetPaymentsByStatus(status string) ([]*PaymentSummary, error)
 }

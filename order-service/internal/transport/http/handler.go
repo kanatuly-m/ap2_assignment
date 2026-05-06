@@ -2,8 +2,9 @@ package http
 
 import (
 	"net/http"
-	"order-service/internal/domain"
 	"strconv"
+
+	"order-service/internal/domain"
 
 	"github.com/gin-gonic/gin"
 )
@@ -17,9 +18,10 @@ func NewOrderHandler(uc domain.OrderUseCase) *OrderHandler {
 }
 
 type CreateOrderRequest struct {
-	CustomerID string `json:"customer_id" binding:"required"`
-	ItemName   string `json:"item_name" binding:"required"`
-	Amount     int64  `json:"amount" binding:"required"`
+	CustomerID    string `json:"customer_id" binding:"required"`
+	CustomerEmail string `json:"customer_email" binding:"required,email"`
+	ItemName      string `json:"item_name" binding:"required"`
+	Amount        int64  `json:"amount" binding:"required,gt=0"`
 }
 
 func (h *OrderHandler) CreateOrder(c *gin.Context) {
@@ -30,11 +32,10 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 	}
 
 	idempKey := c.GetHeader("Idempotency-Key")
-
-	order, err := h.useCase.CreateOrder(req.CustomerID, req.ItemName, req.Amount, idempKey)
+	order, err := h.useCase.CreateOrder(req.CustomerID, req.CustomerEmail, req.ItemName, req.Amount, idempKey)
 	if err != nil {
-		if err.Error() == "503 Service Unavailable" {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Payment Service is unavailable"})
+		if err.Error() == "payment service is unavailable" {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -46,7 +47,7 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 func (h *OrderHandler) GetOrder(c *gin.Context) {
 	order, err := h.useCase.GetOrder(c.Param("id"))
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Order not found"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "order not found"})
 		return
 	}
 	c.JSON(http.StatusOK, order)
@@ -58,20 +59,16 @@ func (h *OrderHandler) CancelOrder(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"message": "Order cancelled"})
+	c.JSON(http.StatusOK, gin.H{"message": "order cancelled"})
 }
 
 func (h *OrderHandler) GetOrdersByAmount(c *gin.Context) {
-	minStr := c.Query("min_amount")
-	maxStr := c.Query("max_amount")
-
-	minAmount, err := strconv.ParseInt(minStr, 10, 64)
+	minAmount, err := strconv.ParseInt(c.Query("min_amount"), 10, 64)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid or missing min_amount"})
 		return
 	}
-
-	maxAmount, err := strconv.ParseInt(maxStr, 10, 64)
+	maxAmount, err := strconv.ParseInt(c.Query("max_amount"), 10, 64)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid or missing max_amount"})
 		return
@@ -82,26 +79,5 @@ func (h *OrderHandler) GetOrdersByAmount(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-
 	c.JSON(http.StatusOK, orders)
-}
-
-func (h *OrderHandler) GetPaymentsByStatus(c *gin.Context) {
-	status := c.Query("status")
-	if status == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "missing status query parameter"})
-		return
-	}
-
-	payments, err := h.useCase.GetPaymentsByStatus(status)
-	if err != nil {
-		if err.Error() == "503 Service Unavailable" {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Payment Service is unavailable"})
-			return
-		}
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, payments)
 }

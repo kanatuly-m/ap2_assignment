@@ -2,6 +2,7 @@ package http
 
 import (
 	"net/http"
+
 	"payment-service/internal/domain"
 
 	"github.com/gin-gonic/gin"
@@ -16,8 +17,9 @@ func NewPaymentHandler(uc domain.PaymentUseCase) *PaymentHandler {
 }
 
 type PaymentRequest struct {
-	OrderID string `json:"order_id" binding:"required"`
-	Amount  int64  `json:"amount" binding:"required"`
+	OrderID       string `json:"order_id" binding:"required"`
+	CustomerEmail string `json:"customer_email" binding:"required,email"`
+	Amount        int64  `json:"amount" binding:"required"`
 }
 
 func (h *PaymentHandler) ProcessPayment(c *gin.Context) {
@@ -27,14 +29,9 @@ func (h *PaymentHandler) ProcessPayment(c *gin.Context) {
 		return
 	}
 
-	payment, err := h.useCase.ProcessPayment(req.OrderID, req.Amount)
+	payment, err := h.useCase.ProcessPayment(c.Request.Context(), req.OrderID, req.CustomerEmail, req.Amount)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	if payment.Status == "Declined" {
-		c.JSON(http.StatusBadRequest, gin.H{"status": payment.Status})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
 		return
 	}
 
@@ -47,7 +44,7 @@ func (h *PaymentHandler) ProcessPayment(c *gin.Context) {
 func (h *PaymentHandler) GetPayment(c *gin.Context) {
 	payment, err := h.useCase.GetPaymentStatus(c.Param("order_id"))
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Payment not found"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "payment not found"})
 		return
 	}
 	c.JSON(http.StatusOK, payment)

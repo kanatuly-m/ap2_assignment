@@ -1,30 +1,43 @@
 package usecase
 
 import (
-	"context"
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"order-service/internal/domain"
+	"net/http"
+	"strings"
 	"time"
 
+	"order-service/internal/domain"
+
 	"github.com/google/uuid"
-	pb "github.com/kanatuly-m/order-payment-generated/payment"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 type orderUseCase struct {
-	repo domain.OrderRepository
+	repo       domain.OrderRepository
+	paymentURL string
+	httpClient *http.Client
 }
 
-func NewOrderUseCase(repo domain.OrderRepository) domain.OrderUseCase {
+func NewOrderUseCase(repo domain.OrderRepository, paymentURL string) domain.OrderUseCase {
 	return &orderUseCase{
-		repo: repo,
+		repo:       repo,
+		paymentURL: strings.TrimRight(paymentURL, "/"),
+		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 }
 
-func (u *orderUseCase) CreateOrder(customerID, itemName string, amount int64, idempKey string) (*domain.Order, error) {
+func (u *orderUseCase) CreateOrder(customerID, customerEmail, itemName string, amount int64, idempKey string) (*domain.Order, error) {
+	if strings.TrimSpace(customerID) == "" {
+		return nil, errors.New("customer_id is required")
+	}
+	if strings.TrimSpace(customerEmail) == "" {
+		return nil, errors.New("customer_email is required")
+	}
+	if strings.TrimSpace(itemName) == "" {
+		return nil, errors.New("item_name is required")
+	}
 	if amount <= 0 {
 		return nil, errors.New("amount must be > 0")
 	}
@@ -39,10 +52,11 @@ func (u *orderUseCase) CreateOrder(customerID, itemName string, amount int64, id
 	order := &domain.Order{
 		ID:             uuid.New().String(),
 		CustomerID:     customerID,
+		CustomerEmail:  customerEmail,
 		ItemName:       itemName,
 		Amount:         amount,
 		Status:         "Pending",
-		CreatedAt:      time.Now(),
+		CreatedAt:      time.Now().UTC(),
 		IdempotencyKey: idempKey,
 	}
 
@@ -50,46 +64,57 @@ func (u *orderUseCase) CreateOrder(customerID, itemName string, amount int64, id
 		return nil, err
 	}
 
-	conn, err := grpc.NewClient(
-		"localhost:50051",
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	)
+	paymentStatus, err := u.processPayment(order)
 	if err != nil {
-		u.repo.UpdateStatus(order.ID, "Failed")
-		return nil, errors.New("503 Service Unavailable")
-	}
-	defer conn.Close()
-
-	client := pb.NewPaymentServiceClient(conn)
-
-	stream, err := client.SubscribeToOrderUpdates(context.Background(), &pb.PaymentRequest{
-		OrderId: order.ID,
-		Amount:  float64(order.Amount),
-	})
-	if err != nil {
-		u.repo.UpdateStatus(order.ID, "Failed")
-		return nil, errors.New("503 Service Unavailable")
+		_ = u.repo.UpdateStatus(order.ID, "Failed")
+		order.Status = "Failed"
+		return nil, err
 	}
 
-	for {
-		res, err := stream.Recv()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			u.repo.UpdateStatus(order.ID, "Failed")
-			return nil, errors.New("503 Service Unavailable")
-		}
+	if paymentStatus == "Authorized" {
+		order.Status = "Paid"
+	} else {
+		order.Status = "Failed"
+	}
 
-		fmt.Println("STREAM UPDATE:", res.Message)
-
-		order.Status = res.Message
-		if err := u.repo.UpdateStatus(order.ID, order.Status); err != nil {
-			return nil, err
-		}
+	if err := u.repo.UpdateStatus(order.ID, order.Status); err != nil {
+		return nil, err
 	}
 
 	return order, nil
+}
+
+func (u *orderUseCase) processPayment(order *domain.Order) (string, error) {
+	paymentReq, err := json.Marshal(map[string]interface{}{
+		"order_id":       order.ID,
+		"amount":         order.Amount,
+		"customer_email": order.CustomerEmail,
+	})
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := u.httpClient.Post(u.paymentURL+"/payments", "application/json", bytes.NewBuffer(paymentReq))
+	if err != nil {
+		return "", errors.New("payment service is unavailable")
+	}
+	defer resp.Body.Close()
+
+	var paymentResp struct {
+		Status string `json:"status"`
+		Error  string `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&paymentResp); err != nil {
+		return "", err
+	}
+
+	if resp.StatusCode >= 500 {
+		return "", fmt.Errorf("payment service error: %s", paymentResp.Error)
+	}
+	if paymentResp.Status == "" {
+		return "", errors.New("payment service returned empty status")
+	}
+	return paymentResp.Status, nil
 }
 
 func (u *orderUseCase) GetOrder(id string) (*domain.Order, error) {
@@ -120,43 +145,5 @@ func (u *orderUseCase) GetOrdersByAmountRange(minAmount, maxAmount int64) ([]*do
 	if minAmount > maxAmount {
 		return nil, errors.New("min_amount cannot be greater than max_amount")
 	}
-
 	return u.repo.GetByAmountRange(minAmount, maxAmount)
-}
-
-func (u *orderUseCase) GetPaymentsByStatus(status string) ([]*domain.PaymentSummary, error) {
-	if status != "Authorized" && status != "Declined" {
-		return nil, errors.New("status must be Authorized or Declined")
-	}
-
-	conn, err := grpc.NewClient(
-		"localhost:50051",
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	)
-	if err != nil {
-		return nil, errors.New("503 Service Unavailable")
-	}
-	defer conn.Close()
-
-	client := pb.NewPaymentServiceClient(conn)
-
-	resp, err := client.ListPayments(context.Background(), &pb.ListPaymentsRequest{
-		Status: status,
-	})
-	if err != nil {
-		return nil, errors.New("503 Service Unavailable")
-	}
-
-	result := make([]*domain.PaymentSummary, 0, len(resp.Payments))
-	for _, p := range resp.Payments {
-		result = append(result, &domain.PaymentSummary{
-			ID:            p.Id,
-			OrderID:       p.OrderId,
-			TransactionID: p.TransactionId,
-			Amount:        p.Amount,
-			Status:        p.Status,
-		})
-	}
-
-	return result, nil
 }
