@@ -6,7 +6,7 @@ import (
 	"time"
 
 	pb "github.com/kanatuly-m/order-payment-generated/payment"
-	"google.golang.org/grpc"
+	gogrpc "google.golang.org/grpc"
 )
 
 type PaymentGRPCHandler struct {
@@ -19,7 +19,6 @@ func NewPaymentGRPCHandler(uc domain.PaymentUseCase) *PaymentGRPCHandler {
 }
 
 func (h *PaymentGRPCHandler) ProcessPayment(ctx context.Context, req *pb.PaymentRequest) (*pb.PaymentResponse, error) {
-
 	payment, err := h.useCase.ProcessPayment(req.OrderId, int64(req.Amount))
 	if err != nil {
 		return nil, err
@@ -31,8 +30,7 @@ func (h *PaymentGRPCHandler) ProcessPayment(ctx context.Context, req *pb.Payment
 	}, nil
 }
 
-func (h *PaymentGRPCHandler) SubscribeToOrderUpdates(req *pb.PaymentRequest, stream grpc.ServerStreamingServer[pb.PaymentResponse]) error {
-
+func (h *PaymentGRPCHandler) SubscribeToOrderUpdates(req *pb.PaymentRequest, stream gogrpc.ServerStreamingServer[pb.PaymentResponse]) error {
 	statuses := []string{"Pending", "Processing", "Completed"}
 
 	for _, status := range statuses {
@@ -48,4 +46,26 @@ func (h *PaymentGRPCHandler) SubscribeToOrderUpdates(req *pb.PaymentRequest, str
 	}
 
 	return nil
+}
+
+func (h *PaymentGRPCHandler) ListPayments(ctx context.Context, req *pb.ListPaymentsRequest) (*pb.ListPaymentsResponse, error) {
+	payments, err := h.useCase.ListPayments(req.Status)
+	if err != nil {
+		return nil, err
+	}
+
+	items := make([]*pb.PaymentItem, 0, len(payments))
+	for _, p := range payments {
+		items = append(items, &pb.PaymentItem{
+			Id:            p.ID,
+			OrderId:       p.OrderID,
+			TransactionId: p.TransactionID,
+			Amount:        p.Amount,
+			Status:        p.Status,
+		})
+	}
+
+	return &pb.ListPaymentsResponse{
+		Payments: items,
+	}, nil
 }

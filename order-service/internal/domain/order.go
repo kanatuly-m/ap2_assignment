@@ -12,6 +12,14 @@ type Order struct {
 	IdempotencyKey string    `json:"-"`
 }
 
+type PaymentSummary struct {
+	ID            string `json:"id"`
+	OrderID       string `json:"order_id"`
+	TransactionID string `json:"transaction_id"`
+	Amount        int64  `json:"amount"`
+	Status        string `json:"status"`
+}
+
 type OrderRepository interface {
 	Save(order *Order) error
 	UpdateStatus(id string, status string) error
@@ -25,4 +33,5 @@ type OrderUseCase interface {
 	GetOrder(id string) (*Order, error)
 	CancelOrder(id string) error
 	GetOrdersByAmountRange(minAmount, maxAmount int64) ([]*Order, error)
+	GetPaymentsByStatus(status string) ([]*PaymentSummary, error)
 }

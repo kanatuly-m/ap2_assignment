@@ -28,6 +28,8 @@ func main() {
 	r.PATCH("/orders/:id/cancel", handler.CancelOrder)
 	r.GET("/orders", handler.GetOrdersByAmount)
 
+	r.GET("/orders/payments", handler.GetPaymentsByStatus)
+
 	log.Println("Order Service is running on port 8080...")
 	r.Run(":8080")
 }
