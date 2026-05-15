@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os/signal"
 	"strconv"
@@ -46,15 +47,61 @@ func main() {
 	store := repository.NewRedisNotificationJobStore(redisClient)
 	uc := usecase.NewNotificationUseCase(store, sender, jobStatusTTL)
 
-	consumer, err := messaging.NewRabbitMQConsumer(rabbitURL, exchange, routingKey, queueName, dlxName, dlqName, maxRetries, baseRetryDelay, uc)
-	if err != nil {
-		log.Fatal("failed to connect to rabbitmq: ", err)
+	workerCount := intFromEnv("NOTIFICATION_WORKERS", 3)
+	if workerCount <= 0 {
+		workerCount = 1
 	}
-	defer consumer.Close()
 
-	log.Printf("Notification provider mode: %s | Retry backoff base: %s | Max retries: %d | Redis job TTL: %s", providerMode, baseRetryDelay, maxRetries, jobStatusTTL)
-	if err := consumer.Start(ctx); err != nil {
-		log.Fatal("notification consumer stopped with error: ", err)
+	log.Printf(
+		"Notification provider mode: %s | Retry backoff base: %s | Max retries: %d | Redis job TTL: %s | Workers: %d",
+		providerMode,
+		baseRetryDelay,
+		maxRetries,
+		jobStatusTTL,
+		workerCount,
+	)
+
+	errCh := make(chan error, workerCount)
+	consumers := make([]*messaging.RabbitMQConsumer, 0, workerCount)
+
+	for i := 1; i <= workerCount; i++ {
+		consumer, err := messaging.NewRabbitMQConsumer(
+			rabbitURL,
+			exchange,
+			routingKey,
+			queueName,
+			dlxName,
+			dlqName,
+			maxRetries,
+			baseRetryDelay,
+			uc,
+		)
+		if err != nil {
+			log.Fatalf("failed to create notification worker %d: %v", i, err)
+		}
+
+		consumers = append(consumers, consumer)
+
+		workerID := i
+		go func() {
+			log.Printf("Notification Worker #%d started", workerID)
+			if err := consumer.Start(ctx); err != nil {
+				errCh <- fmt.Errorf("worker %d stopped with error: %w", workerID, err)
+			}
+		}()
+	}
+
+	defer func() {
+		for _, consumer := range consumers {
+			consumer.Close()
+		}
+	}()
+
+	select {
+	case <-ctx.Done():
+		log.Println("Notification Service stopping gracefully...")
+	case err := <-errCh:
+		log.Fatal(err)
 	}
 
 	log.Println("Notification Service stopped gracefully")
