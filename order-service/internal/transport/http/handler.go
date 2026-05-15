@@ -32,7 +32,7 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 	}
 
 	idempKey := c.GetHeader("Idempotency-Key")
-	order, err := h.useCase.CreateOrder(req.CustomerID, req.CustomerEmail, req.ItemName, req.Amount, idempKey)
+	order, err := h.useCase.CreateOrder(c.Request.Context(), req.CustomerID, req.CustomerEmail, req.ItemName, req.Amount, idempKey)
 	if err != nil {
 		if err.Error() == "payment service is unavailable" {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
@@ -45,7 +45,7 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 }
 
 func (h *OrderHandler) GetOrder(c *gin.Context) {
-	order, err := h.useCase.GetOrder(c.Param("id"))
+	order, err := h.useCase.GetOrder(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "order not found"})
 		return
@@ -54,7 +54,7 @@ func (h *OrderHandler) GetOrder(c *gin.Context) {
 }
 
 func (h *OrderHandler) CancelOrder(c *gin.Context) {
-	err := h.useCase.CancelOrder(c.Param("id"))
+	err := h.useCase.CancelOrder(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -74,7 +74,7 @@ func (h *OrderHandler) GetOrdersByAmount(c *gin.Context) {
 		return
 	}
 
-	orders, err := h.useCase.GetOrdersByAmountRange(minAmount, maxAmount)
+	orders, err := h.useCase.GetOrdersByAmountRange(c.Request.Context(), minAmount, maxAmount)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return

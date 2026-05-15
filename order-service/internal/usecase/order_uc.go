@@ -1,11 +1,9 @@
 package usecase
 
 import (
-	"bytes"
-	"encoding/json"
+	"context"
 	"errors"
-	"fmt"
-	"net/http"
+	"log"
 	"strings"
 	"time"
 
@@ -15,20 +13,22 @@ import (
 )
 
 type orderUseCase struct {
-	repo       domain.OrderRepository
-	paymentURL string
-	httpClient *http.Client
+	repo           domain.OrderRepository
+	paymentGateway domain.PaymentGateway
+	cache          domain.OrderCache
+	cacheTTL       time.Duration
 }
 
-func NewOrderUseCase(repo domain.OrderRepository, paymentURL string) domain.OrderUseCase {
+func NewOrderUseCase(repo domain.OrderRepository, paymentGateway domain.PaymentGateway, cache domain.OrderCache, cacheTTL time.Duration) domain.OrderUseCase {
 	return &orderUseCase{
-		repo:       repo,
-		paymentURL: strings.TrimRight(paymentURL, "/"),
-		httpClient: &http.Client{Timeout: 5 * time.Second},
+		repo:           repo,
+		paymentGateway: paymentGateway,
+		cache:          cache,
+		cacheTTL:       cacheTTL,
 	}
 }
 
-func (u *orderUseCase) CreateOrder(customerID, customerEmail, itemName string, amount int64, idempKey string) (*domain.Order, error) {
+func (u *orderUseCase) CreateOrder(ctx context.Context, customerID, customerEmail, itemName string, amount int64, idempKey string) (*domain.Order, error) {
 	if strings.TrimSpace(customerID) == "" {
 		return nil, errors.New("customer_id is required")
 	}
@@ -64,10 +64,11 @@ func (u *orderUseCase) CreateOrder(customerID, customerEmail, itemName string, a
 		return nil, err
 	}
 
-	paymentStatus, err := u.processPayment(order)
+	paymentStatus, err := u.paymentGateway.ProcessPayment(ctx, order)
 	if err != nil {
 		_ = u.repo.UpdateStatus(order.ID, "Failed")
 		order.Status = "Failed"
+		u.invalidateCache(ctx, order.ID, "payment request failed")
 		return nil, err
 	}
 
@@ -80,48 +81,40 @@ func (u *orderUseCase) CreateOrder(customerID, customerEmail, itemName string, a
 	if err := u.repo.UpdateStatus(order.ID, order.Status); err != nil {
 		return nil, err
 	}
+	u.invalidateCache(ctx, order.ID, "order status changed after payment")
 
 	return order, nil
 }
 
-func (u *orderUseCase) processPayment(order *domain.Order) (string, error) {
-	paymentReq, err := json.Marshal(map[string]interface{}{
-		"order_id":       order.ID,
-		"amount":         order.Amount,
-		"customer_email": order.CustomerEmail,
-	})
+func (u *orderUseCase) GetOrder(ctx context.Context, id string) (*domain.Order, error) {
+	if u.cache != nil {
+		cachedOrder, found, err := u.cache.Get(ctx, id)
+		if err != nil {
+			log.Printf("[Cache] Redis read failed for order:%s: %v", id, err)
+		} else if found {
+			log.Printf("[Cache] HIT order:%s", id)
+			return cachedOrder, nil
+		} else {
+			log.Printf("[Cache] MISS order:%s", id)
+		}
+	}
+
+	order, err := u.repo.GetByID(id)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
-	resp, err := u.httpClient.Post(u.paymentURL+"/payments", "application/json", bytes.NewBuffer(paymentReq))
-	if err != nil {
-		return "", errors.New("payment service is unavailable")
+	if u.cache != nil {
+		if err := u.cache.Set(ctx, order, u.cacheTTL); err != nil {
+			log.Printf("[Cache] Redis write failed for order:%s: %v", id, err)
+		} else {
+			log.Printf("[Cache] SET order:%s ttl=%s", id, u.cacheTTL)
+		}
 	}
-	defer resp.Body.Close()
-
-	var paymentResp struct {
-		Status string `json:"status"`
-		Error  string `json:"error"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&paymentResp); err != nil {
-		return "", err
-	}
-
-	if resp.StatusCode >= 500 {
-		return "", fmt.Errorf("payment service error: %s", paymentResp.Error)
-	}
-	if paymentResp.Status == "" {
-		return "", errors.New("payment service returned empty status")
-	}
-	return paymentResp.Status, nil
+	return order, nil
 }
 
-func (u *orderUseCase) GetOrder(id string) (*domain.Order, error) {
-	return u.repo.GetByID(id)
-}
-
-func (u *orderUseCase) CancelOrder(id string) error {
+func (u *orderUseCase) CancelOrder(ctx context.Context, id string) error {
 	order, err := u.repo.GetByID(id)
 	if err != nil {
 		return err
@@ -132,10 +125,14 @@ func (u *orderUseCase) CancelOrder(id string) error {
 	if order.Status != "Pending" {
 		return errors.New("only pending orders can be cancelled")
 	}
-	return u.repo.UpdateStatus(id, "Cancelled")
+	if err := u.repo.UpdateStatus(id, "Cancelled"); err != nil {
+		return err
+	}
+	u.invalidateCache(ctx, id, "order cancelled")
+	return nil
 }
 
-func (u *orderUseCase) GetOrdersByAmountRange(minAmount, maxAmount int64) ([]*domain.Order, error) {
+func (u *orderUseCase) GetOrdersByAmountRange(ctx context.Context, minAmount, maxAmount int64) ([]*domain.Order, error) {
 	if minAmount < 0 {
 		return nil, errors.New("min_amount cannot be less than 0")
 	}
@@ -146,4 +143,15 @@ func (u *orderUseCase) GetOrdersByAmountRange(minAmount, maxAmount int64) ([]*do
 		return nil, errors.New("min_amount cannot be greater than max_amount")
 	}
 	return u.repo.GetByAmountRange(minAmount, maxAmount)
+}
+
+func (u *orderUseCase) invalidateCache(ctx context.Context, orderID string, reason string) {
+	if u.cache == nil {
+		return
+	}
+	if err := u.cache.Delete(ctx, orderID); err != nil {
+		log.Printf("[Cache] INVALIDATE failed order:%s reason=%s err=%v", orderID, reason, err)
+		return
+	}
+	log.Printf("[Cache] INVALIDATED order:%s reason=%s", orderID, reason)
 }

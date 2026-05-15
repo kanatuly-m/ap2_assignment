@@ -2,17 +2,33 @@ services:
   postgres:
     image: postgres:15-alpine
     container_name: ap2_postgres
+    env_file:
+      - .env
     environment:
-      POSTGRES_USER: user
-      POSTGRES_PASSWORD: password
-      POSTGRES_DB: default_db
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U user -d default_db"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: ap2_redis
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -21,8 +37,8 @@ services:
     image: rabbitmq:3-management-alpine
     container_name: ap2_rabbitmq
     ports:
-      - "5672:5672"
-      - "15672:15672"
+      - "${RABBITMQ_PORT}:5672"
+      - "${RABBITMQ_UI_PORT}:15672"
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "ping"]
       interval: 5s
@@ -34,17 +50,19 @@ services:
       context: .
       dockerfile: payment-service/Dockerfile
     container_name: ap2_payment_service
+    env_file:
+      - .env
     environment:
-      PORT: "8081"
-      DATABASE_URL: postgres://user:password@postgres:5432/payment_db?sslmode=disable
-      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
-      PAYMENT_EXCHANGE: payment.events
-      PAYMENT_ROUTING_KEY: payment.completed
-      PAYMENT_QUEUE: payment.completed
-      PAYMENT_DLX: payment.dlx
-      PAYMENT_DLQ: payment.completed.dlq
+      PORT: ${PAYMENT_PORT}
+      DATABASE_URL: ${PAYMENT_DATABASE_URL}
+      RABBITMQ_URL: ${RABBITMQ_URL}
+      PAYMENT_EXCHANGE: ${PAYMENT_EXCHANGE}
+      PAYMENT_ROUTING_KEY: ${PAYMENT_ROUTING_KEY}
+      PAYMENT_QUEUE: ${PAYMENT_QUEUE}
+      PAYMENT_DLX: ${PAYMENT_DLX}
+      PAYMENT_DLQ: ${PAYMENT_DLQ}
     ports:
-      - "8081:8081"
+      - "${PAYMENT_PORT}:${PAYMENT_PORT}"
     depends_on:
       postgres:
         condition: service_healthy
@@ -57,14 +75,22 @@ services:
       context: .
       dockerfile: order-service/Dockerfile
     container_name: ap2_order_service
+    env_file:
+      - .env
     environment:
-      PORT: "8080"
-      DATABASE_URL: postgres://user:password@postgres:5432/order_db?sslmode=disable
-      PAYMENT_SERVICE_URL: http://payment-service:8081
+      PORT: ${ORDER_PORT}
+      DATABASE_URL: ${ORDER_DATABASE_URL}
+      PAYMENT_SERVICE_URL: ${PAYMENT_SERVICE_URL}
+      REDIS_ADDR: ${REDIS_ADDR}
+      CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS}
+      RATE_LIMIT: ${RATE_LIMIT}
+      RATE_WINDOW_SECONDS: ${RATE_WINDOW_SECONDS}
     ports:
-      - "8080:8080"
+      - "${ORDER_PORT}:${ORDER_PORT}"
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
       payment-service:
         condition: service_started
@@ -75,17 +101,30 @@ services:
       context: .
       dockerfile: notification-service/Dockerfile
     container_name: ap2_notification_service
+    env_file:
+      - .env
     environment:
-      DATABASE_URL: postgres://user:password@postgres:5432/notification_db?sslmode=disable
-      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
-      PAYMENT_EXCHANGE: payment.events
-      PAYMENT_ROUTING_KEY: payment.completed
-      PAYMENT_QUEUE: payment.completed
-      PAYMENT_DLX: payment.dlx
-      PAYMENT_DLQ: payment.completed.dlq
-      MAX_RETRIES: "3"
+      REDIS_ADDR: ${REDIS_ADDR}
+      RABBITMQ_URL: ${RABBITMQ_URL}
+      PAYMENT_EXCHANGE: ${PAYMENT_EXCHANGE}
+      PAYMENT_ROUTING_KEY: ${PAYMENT_ROUTING_KEY}
+      PAYMENT_QUEUE: ${PAYMENT_QUEUE}
+      PAYMENT_DLX: ${PAYMENT_DLX}
+      PAYMENT_DLQ: ${PAYMENT_DLQ}
+      MAX_RETRIES: ${MAX_RETRIES}
+      RETRY_BASE_DELAY_SECONDS: ${RETRY_BASE_DELAY_SECONDS}
+      NOTIFICATION_STATUS_TTL_HOURS: ${NOTIFICATION_STATUS_TTL_HOURS}
+      PROVIDER_MODE: ${PROVIDER_MODE}
+      SIMULATED_LATENCY_MS: ${SIMULATED_LATENCY_MS}
+      SIMULATED_FAILURE_RATE: ${SIMULATED_FAILURE_RATE}
+      SIMULATED_ALWAYS_FAIL_EMAIL: ${SIMULATED_ALWAYS_FAIL_EMAIL}
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT}
+      SMTP_USERNAME: ${SMTP_USERNAME}
+      SMTP_PASSWORD: ${SMTP_PASSWORD}
+      SMTP_FROM: ${SMTP_FROM}
     depends_on:
-      postgres:
+      redis:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
@@ -93,3 +132,4 @@ services:
 
 volumes:
   postgres_data:
+  redis_data:

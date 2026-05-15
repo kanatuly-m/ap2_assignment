@@ -3,7 +3,7 @@ WORKDIR /app
 COPY shared ./shared
 COPY payment-service ./payment-service
 WORKDIR /app/payment-service
-RUN go mod download
+RUN go mod tidy && go mod download
 RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/payment-service ./cmd
 
 FROM alpine:3.20

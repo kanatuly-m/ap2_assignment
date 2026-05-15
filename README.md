@@ -1,81 +1,246 @@
-# AP2 Assignment 3 — Event-Driven Architecture with Message Queues
+# AP2 Assignment 4 — Performance Optimization & External Integrations
 
-This project extends the previous Order + Payment microservice system with a new asynchronous Notification Service.
+This project builds on the previous microservices system:
 
-## Architecture
+- **Order Service** — REST API for orders.
+- **Payment Service** — processes payments and publishes RabbitMQ events.
+- **Notification Service** — background worker consuming RabbitMQ events.
+- **PostgreSQL** — stores orders and payments.
+- **RabbitMQ** — event broker.
+- **Redis** — cache, background-job idempotency, and API rate limiting.
 
-```mermaid
-flowchart LR
-    Client[Client / Postman / curl] -->|REST POST /orders| Order[Order Service]
-    Order -->|REST POST /payments| Payment[Payment Service]
-    Payment -->|DB commit| PaymentDB[(payment_db)]
-    Payment -->|publish persistent event| RabbitMQ[(RabbitMQ)]
-    RabbitMQ -->|payment.completed queue| Notification[Notification Service]
-    Notification -->|manual ACK after log| RabbitMQ
-    Notification -->|idempotency check| NotificationDB[(notification_db)]
-    Order --> OrderDB[(order_db)]
+## What was added in Assignment 4
+
+### 1. Redis cache-aside in Order Service
+
+`GET /orders/:id` now uses the cache-aside pattern:
+
+1. Check Redis key `order:{id}`.
+2. On cache HIT, return cached JSON.
+3. On cache MISS, read PostgreSQL, cache the result, and return it.
+4. TTL is configured through `.env` using `CACHE_TTL_SECONDS`.
+
+Default TTL:
+
+```env
+CACHE_TTL_SECONDS=300
 ```
 
-## Event flow
+### 2. Cache invalidation
 
-1. Client creates an order through `POST /orders`.
-2. Order Service saves the order as `Pending`.
-3. Order Service calls Payment Service.
-4. Payment Service saves the payment result in `payment_db`.
-5. If the payment is `Authorized`, Payment Service publishes `PaymentCompletedEvent` to RabbitMQ.
-6. Notification Service consumes the event from the durable `payment.completed` queue.
-7. Notification Service checks `processed_events` to avoid duplicate processing.
-8. The notification is simulated by console log.
-9. The message is ACKed only after successful processing.
+When an order status changes, the matching Redis key is removed immediately:
 
-## Reliability decisions
+- after payment updates the order to `Paid` or `Failed`;
+- after a cancellation update.
 
-### Manual ACK
+This prevents stale order statuses from being returned.
 
-The consumer uses `autoAck = false`. It calls `Ack(false)` only after the notification log is printed successfully.
+Example logs:
 
-### Durable queue and persistent messages
+```text
+[Cache] MISS order:...
+[Cache] SET order:... ttl=5m0s
+[Cache] HIT order:...
+[Cache] INVALIDATED order:... reason=order status changed after payment
+```
 
-RabbitMQ exchange and queue are declared as durable. The producer publishes messages with `DeliveryMode = amqp.Persistent`.
+### 3. Provider Adapter in Notification Service
 
-### Producer confirmation
+The worker depends on an `EmailSender` interface, not on a concrete provider.
 
-Payment Service enables RabbitMQ publisher confirms. It waits for broker confirmation before treating the publish operation as successful.
+Supported modes:
 
-### Idempotent consumer
+- `PROVIDER_MODE=SIMULATED` — default demo adapter. It adds latency and random provider failures.
+- `PROVIDER_MODE=REAL` — SMTP adapter using environment variables.
 
-Notification Service stores every processed `event_id` in `notification_db.processed_events`. If RabbitMQ redelivers the same event, the service ACKs it but does not print the notification again.
+The simulated provider is configured in `.env`:
 
-### DLQ bonus
+```env
+PROVIDER_MODE=SIMULATED
+SIMULATED_LATENCY_MS=500
+SIMULATED_FAILURE_RATE=0.20
+SIMULATED_ALWAYS_FAIL_EMAIL=fail@example.com
+```
 
-The project includes a Dead Letter Queue:
+`fail@example.com` is intentionally used to demonstrate retries and DLQ movement.
 
-- main queue: `payment.completed`
-- DLX: `payment.dlx`
-- DLQ: `payment.completed.dlq`
+### 4. Reliable background jobs
 
-For demo, use `customer_email = "fail@example.com"`. Notification Service makes 3 processing attempts and then moves the message to the DLQ.
+Notification Service remains fully asynchronous:
 
-## Run
+```text
+Payment Service -> RabbitMQ -> Notification Worker -> Provider Adapter
+```
+
+The HTTP response does **not** wait for a slow external notification provider.
+
+### 5. Redis idempotency record for notification jobs
+
+Before sending, the worker checks Redis key:
+
+```text
+notification:payment:{payment_id}
+```
+
+Statuses are stored in Redis:
+
+- `processing`
+- `failed`
+- `sent`
+
+If the same `payment_id` is published again and status is already `sent`, the worker skips duplicate sending.
+
+### 6. Exponential backoff
+
+When the provider fails, the RabbitMQ worker retries with increasing delays:
+
+```env
+MAX_RETRIES=3
+RETRY_BASE_DELAY_SECONDS=2
+```
+
+Default timing:
+
+- Retry 1 after 2 seconds
+- Retry 2 after 4 seconds
+- Retry 3 after 8 seconds
+- Next failure moves the message to DLQ
+
+### 7. DLQ from Assignment 3 is preserved
+
+Failed messages move to:
+
+```text
+payment.completed.dlq
+```
+
+### 8. Bonus: Redis API rate limiter
+
+Order Service includes Gin middleware that stores counters in Redis:
+
+```text
+rate:{client_ip}
+```
+
+Default limit:
+
+```env
+RATE_LIMIT=10
+RATE_WINDOW_SECONDS=60
+```
+
+When the limit is exceeded, the API returns:
+
+```http
+429 Too Many Requests
+```
+
+## Clean boundary design
+
+The use cases do not directly initialize Redis, HTTP clients, RabbitMQ, or SMTP.
+
+- Order Use Case depends on interfaces:
+  - `OrderRepository`
+  - `OrderCache`
+  - `PaymentGateway`
+- Notification Use Case depends on interfaces:
+  - `NotificationJobStore`
+  - `EmailSender`
+
+Concrete implementations are placed in infrastructure/adapter packages.
+
+## Run the project
+
+From the project root:
 
 ```bash
+docker compose down -v --remove-orphans
 docker compose up --build
 ```
 
-RabbitMQ Management UI:
+Main endpoints:
 
-```text
-http://localhost:15672
-username: guest
-password: guest
-```
+- Order Service: `http://localhost:8080`
+- Payment Service: `http://localhost:8081`
+- RabbitMQ UI: `http://localhost:15672`
+  - username: `guest`
+  - password: `guest`
+- Redis: `localhost:6379`
 
-## Test successful notification
+## Demo 1 — Create an order
 
 ```bash
-curl -X POST http://localhost:8080/orders   -H "Content-Type: application/json"   -H "Idempotency-Key: order-001"   -d '{
+curl -X POST http://localhost:8080/orders \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: assignment4-order-001" \
+  -d '{
     "customer_id": "123",
     "customer_email": "user@example.com",
+    "item_name": "Coffee",
+    "amount": 9999
+  }'
+```
+
+Expected result: order status becomes `Paid`, Payment Service publishes an event, Notification Worker processes it asynchronously.
+
+## Demo 2 — Cache MISS and HIT
+
+Copy the returned order ID and run twice:
+
+```bash
+curl http://localhost:8080/orders/ORDER_ID
+curl http://localhost:8080/orders/ORDER_ID
+```
+
+Then view logs:
+
+```bash
+docker logs ap2_order_service
+```
+
+Expected logs:
+
+```text
+[Cache] MISS order:ORDER_ID
+[Cache] SET order:ORDER_ID ttl=5m0s
+[Cache] HIT order:ORDER_ID
+```
+
+## Demo 3 — Duplicate notification prevention via Redis
+
+Call Payment Service again with the same order ID. Payment Service republishes the same payment event, and Notification Worker should skip duplicate sending because Redis already stores status `sent`.
+
+```bash
+curl -X POST http://localhost:8081/payments \
+  -H "Content-Type: application/json" \
+  -d '{
+    "order_id": "ORDER_ID",
+    "customer_email": "user@example.com",
+    "amount": 9999
+  }'
+```
+
+Check:
+
+```bash
+docker logs ap2_notification_service
+```
+
+Expected duplicate log:
+
+```text
+[Notification] Duplicate payment job skipped: payment_id=...
+```
+
+## Demo 4 — Retry + exponential backoff + DLQ
+
+```bash
+curl -X POST http://localhost:8080/orders \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: assignment4-dlq-001" \
+  -d '{
+    "customer_id": "123",
+    "customer_email": "fail@example.com",
     "item_name": "Coffee",
     "amount": 9999
   }'
@@ -84,43 +249,58 @@ curl -X POST http://localhost:8080/orders   -H "Content-Type: application/json" 
 Check logs:
 
 ```bash
-docker logs ap2_notification_service
+docker logs -f ap2_notification_service
 ```
 
-Expected log:
+Expected messages:
 
 ```text
-[Notification] Sent email to user@example.com for Order #<order_id>. Amount: $99.99
+Retry 1/3 in 2s
+Retry 2/3 in 4s
+Retry 3/3 in 8s
+Max retries exhausted. Moving message to DLQ.
 ```
 
-## Test idempotency
+Open RabbitMQ UI and check queue:
 
-Run the same curl command again with the same `Idempotency-Key`. Order Service returns the same order and Payment Service is not called again.
+```text
+payment.completed.dlq
+```
 
-To demonstrate consumer idempotency directly, re-publish the same event with the same `event_id`; Notification Service will skip the duplicate because it already exists in `processed_events`.
-
-## Test DLQ
+## Demo 5 — Rate limiter bonus
 
 ```bash
-curl -X POST http://localhost:8080/orders   -H "Content-Type: application/json"   -H "Idempotency-Key: order-dlq-001"   -d '{
-    "customer_id": "123",
-    "customer_email": "fail@example.com",
-    "item_name": "Coffee",
-    "amount": 9999
-  }'
+for i in $(seq 1 12); do
+  curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8080/orders/unknown-id
+done
 ```
 
-Then open RabbitMQ UI and check the queue `payment.completed.dlq`.
+Expected: after the configured threshold, responses become `429`.
 
-## Useful commands for defense
+## Real email mode
 
-```bash
-docker compose ps
-docker logs ap2_order_service
-docker logs ap2_payment_service
-docker logs ap2_notification_service
+The project includes an SMTP adapter. Keep `PROVIDER_MODE=SIMULATED` for the assignment demo. To use real email sending, set:
+
+```env
+PROVIDER_MODE=REAL
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USERNAME=your_email@example.com
+SMTP_PASSWORD=your_app_password
+SMTP_FROM=your_email@example.com
 ```
 
-```bash
-curl http://localhost:8080/orders?min_amount=1\&max_amount=100000
-```
+Do not publish real credentials in a public repository.
+
+## Submission checklist
+
+- Source code for Order, Payment, Notification services
+- Redis cache-aside + TTL + invalidation
+- Background worker + Adapter Pattern
+- Redis-based job idempotency
+- Exponential backoff retries
+- Docker Compose with Redis
+- `.env` configuration
+- Updated architecture diagram
+- README explanation
+- Bonus Redis rate limiter

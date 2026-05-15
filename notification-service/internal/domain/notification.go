@@ -2,12 +2,18 @@ package domain
 
 import (
 	"context"
+	"time"
 
 	"ap2_assignment/shared/events"
 )
 
-type ProcessedEventStore interface {
-	TryMarkProcessed(ctx context.Context, eventID string, orderID string) (bool, error)
+type NotificationJobStore interface {
+	GetStatus(ctx context.Context, paymentID string) (string, error)
+	SetStatus(ctx context.Context, paymentID string, status string, ttl time.Duration) error
+}
+
+type EmailSender interface {
+	Send(ctx context.Context, event events.PaymentCompletedEvent) error
 }
 
 type NotificationUseCase interface {

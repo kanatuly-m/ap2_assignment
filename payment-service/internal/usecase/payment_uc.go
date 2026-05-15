@@ -69,6 +69,7 @@ func (u *paymentUseCase) ProcessPayment(ctx context.Context, orderID string, cus
 func (u *paymentUseCase) publishAuthorizedPayment(ctx context.Context, payment *domain.Payment) error {
 	event := events.PaymentCompletedEvent{
 		EventID:       payment.ID,
+		PaymentID:     payment.ID,
 		OrderID:       payment.OrderID,
 		Amount:        payment.Amount,
 		CustomerEmail: payment.CustomerEmail,

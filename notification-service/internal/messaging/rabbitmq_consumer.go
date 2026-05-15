@@ -14,17 +14,18 @@ import (
 )
 
 type RabbitMQConsumer struct {
-	conn       *amqp.Connection
-	channel    *amqp.Channel
-	confirms   <-chan amqp.Confirmation
-	exchange   string
-	routingKey string
-	queueName  string
-	maxRetries int
-	useCase    domain.NotificationUseCase
+	conn           *amqp.Connection
+	channel        *amqp.Channel
+	confirms       <-chan amqp.Confirmation
+	exchange       string
+	routingKey     string
+	queueName      string
+	maxRetries     int
+	baseRetryDelay time.Duration
+	useCase        domain.NotificationUseCase
 }
 
-func NewRabbitMQConsumer(url, exchange, routingKey, queueName, dlxName, dlqName string, maxRetries int, uc domain.NotificationUseCase) (*RabbitMQConsumer, error) {
+func NewRabbitMQConsumer(url, exchange, routingKey, queueName, dlxName, dlqName string, maxRetries int, baseRetryDelay time.Duration, uc domain.NotificationUseCase) (*RabbitMQConsumer, error) {
 	conn, err := amqp.Dial(url)
 	if err != nil {
 		return nil, err
@@ -55,14 +56,15 @@ func NewRabbitMQConsumer(url, exchange, routingKey, queueName, dlxName, dlqName 
 	}
 
 	return &RabbitMQConsumer{
-		conn:       conn,
-		channel:    channel,
-		confirms:   channel.NotifyPublish(make(chan amqp.Confirmation, 1)),
-		exchange:   exchange,
-		routingKey: routingKey,
-		queueName:  queueName,
-		maxRetries: maxRetries,
-		useCase:    uc,
+		conn:           conn,
+		channel:        channel,
+		confirms:       channel.NotifyPublish(make(chan amqp.Confirmation, 1)),
+		exchange:       exchange,
+		routingKey:     routingKey,
+		queueName:      queueName,
+		maxRetries:     maxRetries,
+		baseRetryDelay: baseRetryDelay,
+		useCase:        uc,
 	}, nil
 }
 
@@ -133,13 +135,21 @@ func (c *RabbitMQConsumer) handleDelivery(ctx context.Context, delivery amqp.Del
 
 func (c *RabbitMQConsumer) handleFailure(ctx context.Context, delivery amqp.Delivery, processingErr error) {
 	retryCount := getRetryCount(delivery.Headers)
-	if retryCount >= c.maxRetries-1 {
-		log.Printf("[Notification] Max attempts reached. Moving message to DLQ. Error: %v", processingErr)
+	if retryCount >= c.maxRetries {
+		log.Printf("[Notification] Max retries exhausted. Moving message to DLQ. Error: %v", processingErr)
 		_ = delivery.Nack(false, false)
 		return
 	}
 
 	nextRetry := retryCount + 1
+	delay := c.backoffDelay(nextRetry)
+	log.Printf("[Notification] Processing failed. Retry %d/%d in %s. Error: %v", nextRetry, c.maxRetries, delay, processingErr)
+	if err := waitWithContext(ctx, delay); err != nil {
+		log.Printf("[Notification] Retry wait interrupted, requeueing original message: %v", err)
+		_ = delivery.Nack(false, true)
+		return
+	}
+
 	headers := copyHeaders(delivery.Headers)
 	headers["x-retry-count"] = int32(nextRetry)
 
@@ -180,8 +190,33 @@ func (c *RabbitMQConsumer) handleFailure(ctx context.Context, delivery amqp.Deli
 		return
 	}
 
-	log.Printf("[Notification] Processing failed. Retry %d/%d scheduled. Error: %v", nextRetry, c.maxRetries, processingErr)
+	log.Printf("[Notification] Retry %d/%d re-published after %s backoff", nextRetry, c.maxRetries, delay)
 	_ = delivery.Ack(false)
+}
+
+func (c *RabbitMQConsumer) backoffDelay(retryNumber int) time.Duration {
+	if retryNumber < 1 {
+		retryNumber = 1
+	}
+	delay := c.baseRetryDelay
+	for i := 1; i < retryNumber; i++ {
+		delay *= 2
+	}
+	return delay
+}
+
+func waitWithContext(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func getRetryCount(headers amqp.Table) int {

@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 type Order struct {
 	ID             string    `json:"id"`
@@ -21,9 +24,19 @@ type OrderRepository interface {
 	GetByAmountRange(minAmount, maxAmount int64) ([]*Order, error)
 }
 
+type OrderCache interface {
+	Get(ctx context.Context, id string) (*Order, bool, error)
+	Set(ctx context.Context, order *Order, ttl time.Duration) error
+	Delete(ctx context.Context, id string) error
+}
+
+type PaymentGateway interface {
+	ProcessPayment(ctx context.Context, order *Order) (string, error)
+}
+
 type OrderUseCase interface {
-	CreateOrder(customerID, customerEmail, itemName string, amount int64, idempKey string) (*Order, error)
-	GetOrder(id string) (*Order, error)
-	CancelOrder(id string) error
-	GetOrdersByAmountRange(minAmount, maxAmount int64) ([]*Order, error)
+	CreateOrder(ctx context.Context, customerID, customerEmail, itemName string, amount int64, idempKey string) (*Order, error)
+	GetOrder(ctx context.Context, id string) (*Order, error)
+	CancelOrder(ctx context.Context, id string) error
+	GetOrdersByAmountRange(ctx context.Context, minAmount, maxAmount int64) ([]*Order, error)
 }
