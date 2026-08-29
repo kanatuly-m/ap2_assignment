@@ -1,10 +1,11 @@
 package http
 
 import (
-	"github.com/gin-gonic/gin"
 	"net/http"
 	"order-service/internal/domain"
 	"strconv"
+
+	"github.com/gin-gonic/gin"
 )
 
 type OrderHandler struct {
@@ -83,4 +84,24 @@ func (h *OrderHandler) GetOrdersByAmount(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, orders)
+}
+
+func (h *OrderHandler) GetPaymentsByStatus(c *gin.Context) {
+	status := c.Query("status")
+	if status == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing status query parameter"})
+		return
+	}
+
+	payments, err := h.useCase.GetPaymentsByStatus(status)
+	if err != nil {
+		if err.Error() == "503 Service Unavailable" {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Payment Service is unavailable"})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, payments)
 }

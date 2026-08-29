@@ -19,7 +19,7 @@ func main() {
 	defer db.Close()
 
 	repo := repository.NewPostgresOrderRepository(db)
-	uc := usecase.NewOrderUseCase(repo, "http://localhost:8081")
+	uc := usecase.NewOrderUseCase(repo)
 	handler := transport.NewOrderHandler(uc)
 
 	r := gin.Default()
@@ -27,6 +27,8 @@ func main() {
 	r.GET("/orders/:id", handler.GetOrder)
 	r.PATCH("/orders/:id/cancel", handler.CancelOrder)
 	r.GET("/orders", handler.GetOrdersByAmount)
+
+	r.GET("/orders/payments", handler.GetPaymentsByStatus)
 
 	log.Println("Order Service is running on port 8080...")
 	r.Run(":8080")
